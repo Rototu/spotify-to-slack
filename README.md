@@ -44,3 +44,5 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.spotify-status-on-sl
 ## License
 
 MIT © 2026 Emanuel Farauanu
+
+Inspired by [work](https://github.com/mpangrazzi/spotify-status-on-slack) done by [mpangrazzi](https://github.com/mpangrazzi)
