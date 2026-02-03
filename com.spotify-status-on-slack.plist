@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.spotify-status-on-slack</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/bun</string>
+        <string>run</string>
+        <string>/Users/emanuelfarauanu/CODE/spotify-status-on-slack/spotify-status.ts</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/emanuelfarauanu/CODE/spotify-status-on-slack</string>
+    <key>StartInterval</key>
+    <integer>30</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/emanuelfarauanu/CODE/spotify-status-on-slack/spotify-status.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/emanuelfarauanu/CODE/spotify-status-on-slack/spotify-status.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

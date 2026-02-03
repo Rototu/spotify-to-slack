@@ -1,0 +1,14 @@
+{
+  "slackToken": "xoxp-your-token-here",
+  "statusTtlSeconds": 120,
+  "statusEmoji": ":headphones:",
+  "statusEmojiUnicode": "🎧",
+  "alwaysOverride": false,
+  "requireTwoEmptyReadsBeforeOverride": true,
+  "emptyReadConfirmWindowSeconds": 600,
+  "cacheMaxAgeSeconds": 600,
+  "logMaxLines": 5000,
+  "logKeepLines": 3000,
+  "stdoutLogPath": "./spotify-status.log",
+  "stderrLogPath": "./spotify-status.error.log"
+}

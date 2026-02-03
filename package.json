@@ -1,9 +1,21 @@
 {
   "name": "spotify-status-on-slack",
   "version": "1.0.0",
-  "description": "A very simple `bash` script to set Slack status to your currently playing track on Spotify.",
-  "main": "main.sh",
-  "keywords": ["Slack", "Spotify", "Status"],
-  "author": "Michele Pangrazzi <xmikex83@gmail.com>",
+  "description": "A Bun + TypeScript script to set Slack status to your currently playing track on Spotify.",
+  "main": "spotify-status.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun run spotify-status.ts",
+    "run": "bun run spotify-status.ts"
+  },
+  "dependencies": {
+    "chalk": "^5.4.1"
+  },
+  "keywords": [
+    "Slack",
+    "Spotify",
+    "Status"
+  ],
+  "author": "Emanuel Farauanu <rototuro@gmail.com>",
   "license": "MIT"
 }
