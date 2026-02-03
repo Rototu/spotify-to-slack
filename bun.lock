@@ -5,10 +5,13 @@
       "name": "spotify-status-on-slack",
       "dependencies": {
         "chalk": "^5.4.1",
+        "obscenity": "^0.4.5",
       },
     },
   },
   "packages": {
     "chalk": ["chalk@5.6.2", "", {}, "sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA=="],
+
+    "obscenity": ["obscenity@0.4.6", "", {}, "sha512-pHk7kNN7j3L3zGhhGnwxjvXIGsPpLrcZl2r58fqWh/V/rH6b/dafscj2sMmAY+A/9/wPsocLmimgGk2DKeKsFQ=="],
   }
 }

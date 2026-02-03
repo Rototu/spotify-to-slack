@@ -5,8 +5,27 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import {
+  RegExpMatcher,
+  TextCensor,
+  englishDataset,
+  englishRecommendedTransformers,
+} from "obscenity";
 
 const execFileAsync = promisify(execFile);
+
+// Profanity filter setup
+const profanityMatcher = new RegExpMatcher({
+  ...englishDataset.build(),
+  ...englishRecommendedTransformers,
+});
+const textCensor = new TextCensor();
+
+function censorText(text: string): string {
+  const matches = profanityMatcher.getAllMatches(text);
+  if (matches.length === 0) return text;
+  return textCensor.applyTo(text, matches);
+}
 
 type Config = {
   slackToken: string;
@@ -402,10 +421,13 @@ async function main() {
     return;
   }
 
-  const track = await getSpotifyTrack();
+  const rawTrack = await getSpotifyTrack();
+  const track = censorText(rawTrack);
   const exp = nowSec() + cfg.statusTtlSeconds;
   log("INFO", "Updating Slack status to current track", {
+    rawTrack,
     track,
+    censored: rawTrack !== track,
     expirationEpoch: exp,
   });
 

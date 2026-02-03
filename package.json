@@ -9,7 +9,8 @@
     "run": "bun run spotify-status.ts"
   },
   "dependencies": {
-    "chalk": "^5.4.1"
+    "chalk": "^5.4.1",
+    "obscenity": "^0.4.5"
   },
   "keywords": [
     "Slack",
