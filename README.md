@@ -27,33 +27,30 @@ Auth with a single password stored in `CONFIG_UI_PASSWORD` when that value is
 non-empty. If `CONFIG_UI_PASSWORD` is explicitly set to an empty string, auth
 is disabled.
 
-### Build UI (static)
+### Quick start
+
+Build and serve the UI in one command:
 
 ```bash
-bun run ui:build
+CONFIG_UI_PASSWORD=your-password bun serve
 ```
 
-### Run UI server
+### Dev mode
+
+Watches for file changes and auto-rebuilds with hot reload:
 
 ```bash
-CONFIG_UI_PASSWORD=your-password bun run ui:serve
+CONFIG_UI_PASSWORD=your-password bun dev
 ```
 
-By default it serves `./dist` on port `3999`. Optional environment variables:
+By default the server runs on port `3999`. Optional environment variables:
 
 - `CONFIG_UI_PORT`: override port
 - `CONFIG_UI_PUBLIC_DIR`: override static directory (default `dist`)
 - `CONFIG_PATH`: override config file path
 - `CONFIG_UI_PASSWORD`: Basic Auth password (set to empty string to disable auth)
 
-### Dev mode
-
-```bash
-bun run ui:watch
-CONFIG_UI_PASSWORD=your-password bun run ui:serve
-```
-
-Run the watcher in one terminal to rebuild assets, and the server in another.
+See `package.json` for additional scripts (e.g. `ui:build`, `ui:watch`, `ui:serve`).
 
 ## Local-only runtime
 
