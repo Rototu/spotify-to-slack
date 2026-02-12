@@ -1,18 +1,24 @@
 import chalk from "chalk";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { z } from "zod";
 import {
   RegExpMatcher,
   TextCensor,
   englishDataset,
   englishRecommendedTransformers,
 } from "obscenity";
+import { type Config, DEFAULT_CONFIG } from "./config-schema";
+import {
+  getConfigSearchPaths,
+  readConfigFile,
+  resolveConfigPath,
+} from "./config";
 
-const execFileAsync = promisify(execFile);
+const executeFileAsync = promisify(execFile);
 
 // Profanity filter setup
 const profanityMatcher = new RegExpMatcher({
@@ -26,22 +32,6 @@ function censorText(text: string): string {
   if (matches.length === 0) return text;
   return textCensor.applyTo(text, matches);
 }
-
-type Config = {
-  slackToken: string;
-  pollIntervalSeconds?: number; // informational; launchd controls interval
-  statusEmoji?: string; // default ":headphones:"
-  statusEmojiUnicode?: string; // default "🎧"
-  statusTtlSeconds?: number; // default 120
-  alwaysOverride?: boolean; // default false
-  requireTwoEmptyReadsBeforeOverride?: boolean; // default true
-  emptyReadConfirmWindowSeconds?: number; // default 600
-  cacheMaxAgeSeconds?: number; // default 600
-  logMaxLines?: number; // default 5000
-  logKeepLines?: number; // default 3000
-  stdoutLogPath?: string; // default ./spotify-status.log
-  stderrLogPath?: string; // default ./spotify-status.error.log
-};
 
 type SlackProfile = {
   status_text?: string;
@@ -75,23 +65,55 @@ type Cache = {
   };
 };
 
+const cacheSchema: z.ZodType<Cache> = z
+  .object({
+    updatedAt: z.number().finite().min(0),
+    lastNonEmptyNonOwned: z
+      .object({
+        text: z.string(),
+        emoji: z.string(),
+        expiration: z.number().finite().min(0),
+        observedAt: z.number().finite().min(0),
+      })
+      .optional(),
+    emptyRead: z
+      .object({
+        lastSeenAt: z.number().finite().min(0),
+        consecutiveCount: z.number().int().min(0),
+      })
+      .optional(),
+    lastSetByScript: z
+      .object({
+        text: z.string(),
+        emoji: z.string(),
+        expiration: z.number().finite().min(0),
+        setAt: z.number().finite().min(0),
+      })
+      .optional(),
+  })
+  .passthrough();
+
 const SCRIPT_VERSION = "ts-bun-v1";
 
-function nowSec() {
+function currentTimestampSeconds() {
   return Math.floor(Date.now() / 1000);
 }
 
-function ts() {
+function timestampIso() {
   return new Date().toISOString();
 }
 
-function redactToken(s: string) {
-  return s.replace(/xox[pbar]-[A-Za-z0-9-]+/g, "xox*-REDACTED");
+function redactSlackToken(value: string) {
+  return value.replace(/xox[pbar]-[A-Za-z0-9-]+/g, "xox*-REDACTED");
 }
 
 type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
-function log(level: LogLevel, msg: string, meta?: Record<string, unknown>) {
+function log(
+  level: LogLevel,
+  message: string,
+  metadata?: Record<string, unknown>
+) {
   const prefix =
     level === "DEBUG"
       ? chalk.gray(level)
@@ -101,11 +123,11 @@ function log(level: LogLevel, msg: string, meta?: Record<string, unknown>) {
       ? chalk.yellow(level)
       : chalk.red(level);
 
-  const line = `${chalk.gray(ts())} ${prefix} ${msg}`;
-  if (meta && Object.keys(meta).length > 0) {
+  const line = `${chalk.gray(timestampIso())} ${prefix} ${message}`;
+  if (metadata && Object.keys(metadata).length > 0) {
     // Avoid dumping secrets.
-    const sanitized = JSON.stringify(meta, (_k, v) =>
-      typeof v === "string" ? redactToken(v) : v
+    const sanitized = JSON.stringify(metadata, (_key, value) =>
+      typeof value === "string" ? redactSlackToken(value) : value
     );
     console.log(`${line} ${chalk.gray(sanitized)}`);
   } else {
@@ -113,56 +135,55 @@ function log(level: LogLevel, msg: string, meta?: Record<string, unknown>) {
   }
 }
 
-function configSearchPaths(repoDir: string) {
-  const home = os.homedir();
-  return [
-    path.join(repoDir, "config.local.json"),
-    path.join(home, ".config", "spotify-status-on-slack", "config.json"),
-  ];
-}
-
-async function readJsonFile<T>(p: string): Promise<T> {
-  const raw = await readFile(p, "utf8");
-  return JSON.parse(raw) as T;
-}
-
-async function loadConfig(
-  repoDir: string
+async function loadConfiguration(
+  repositoryDirectory: string
 ): Promise<{ config: Config; path: string }> {
-  const paths = configSearchPaths(repoDir);
-  for (const p of paths) {
-    if (existsSync(p)) {
-      const config = await readJsonFile<Config>(p);
-      if (!config.slackToken || typeof config.slackToken !== "string") {
-        throw new Error(`Config at ${p} must include a 'slackToken' string.`);
-      }
-      return { config, path: p };
-    }
-  }
-  throw new Error(
-    `No config found. Create ${paths[0]} (recommended) or ${paths[1]}. See README.`
+  const configPath = resolveConfigPath(
+    repositoryDirectory,
+    Bun.env.CONFIG_PATH ?? process.env.CONFIG_PATH
   );
+  if (!existsSync(configPath)) {
+    const paths = getConfigSearchPaths(repositoryDirectory);
+    throw new Error(
+      `No config found. Create ${paths[0]} (recommended) or ${paths[1]}. See README.`
+    );
+  }
+  const config = await readConfigFile(configPath);
+  return { config, path: configPath };
 }
 
-function cachePath(repoDir: string) {
-  return path.join(repoDir, ".slack_status_cache.json");
+function getCacheFilePath(repositoryDirectory: string) {
+  return path.join(repositoryDirectory, ".slack_status_cache.json");
 }
 
-async function loadCache(repoDir: string): Promise<Cache> {
-  const p = cachePath(repoDir);
+function parseCache(cachePayload: unknown): Cache {
+  const parsed = cacheSchema.safeParse(cachePayload);
+  if (!parsed.success) {
+    throw new Error("Cache file is corrupted or invalid.");
+  }
+  return parsed.data;
+}
+
+async function loadCache(repositoryDirectory: string): Promise<Cache> {
+  const filePath = getCacheFilePath(repositoryDirectory);
   try {
-    if (!existsSync(p)) return { updatedAt: nowSec() };
-    const c = await readJsonFile<Cache>(p);
-    return c && typeof c === "object" ? c : { updatedAt: nowSec() };
-  } catch {
-    return { updatedAt: nowSec() };
+    if (!existsSync(filePath)) {
+      return { updatedAt: currentTimestampSeconds() };
+    }
+    const rawCacheContent = await readFile(filePath, "utf8");
+    return parseCache(JSON.parse(rawCacheContent));
+  } catch (error) {
+    log("WARN", "Cache read failed; starting fresh.", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { updatedAt: currentTimestampSeconds() };
   }
 }
 
-async function saveCache(repoDir: string, c: Cache) {
-  const p = cachePath(repoDir);
-  c.updatedAt = nowSec();
-  await writeFile(p, JSON.stringify(c, null, 2), "utf8");
+async function saveCache(repositoryDirectory: string, cache: Cache) {
+  const filePath = getCacheFilePath(repositoryDirectory);
+  cache.updatedAt = currentTimestampSeconds();
+  await writeFile(filePath, JSON.stringify(cache, null, 2), "utf8");
 }
 
 async function trimLogFile(
@@ -183,24 +204,28 @@ async function trimLogFile(
       lines.slice(Math.max(0, lineCount - keepLines), lineCount).join("\n") +
       "\n";
     await writeFile(filePath, tail, "utf8");
-  } catch (e) {
+  } catch (error) {
     log("WARN", "Log trimming failed (non-fatal)", {
       filePath,
-      error: String(e),
+      error: String(error),
     });
   }
 }
 
 async function osascript(script: string): Promise<string> {
-  const { stdout } = await execFileAsync("/usr/bin/osascript", ["-e", script], {
-    timeout: 10_000,
-  });
+  const { stdout } = await executeFileAsync(
+    "/usr/bin/osascript",
+    ["-e", script],
+    {
+      timeout: 10_000,
+    }
+  );
   return stdout.trim();
 }
 
 async function isSpotifyRunning(): Promise<boolean> {
   try {
-    await execFileAsync("/usr/bin/pgrep", ["Spotify"], { timeout: 3_000 });
+    await executeFileAsync("/usr/bin/pgrep", ["Spotify"], { timeout: 3_000 });
     return true;
   } catch {
     return false;
@@ -227,12 +252,12 @@ async function getSpotifyTrack(): Promise<string> {
   return song;
 }
 
-async function slackApi<T>(
+async function callSlackApi<T>(
   token: string,
   method: string,
   body?: Record<string, unknown>
 ): Promise<T> {
-  const res = await fetch(`https://slack.com/api/${method}`, {
+  const response = await fetch(`https://slack.com/api/${method}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -240,39 +265,38 @@ async function slackApi<T>(
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  const text = await res.text();
+  const responseText = await response.text();
   try {
-    return JSON.parse(text) as T;
-  } catch (e) {
+    return JSON.parse(responseText) as T;
+  } catch (error) {
     throw new Error(
-      `Slack API ${method} returned non-JSON: ${String(e)} body=${text.slice(
-        0,
-        500
-      )}`
+      `Slack API ${method} returned non-JSON: ${String(
+        error
+      )} body=${responseText.slice(0, 500)}`
     );
   }
 }
 
-async function slackProfileGetWithRetry(token: string) {
-  const attempts = 3;
-  let lastErr: unknown;
-  for (let i = 1; i <= attempts; i++) {
+async function getSlackProfileWithRetry(token: string) {
+  const maxAttempts = 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      const resp = await slackApi<SlackProfileGetResponse>(
+      const response = await callSlackApi<SlackProfileGetResponse>(
         token,
         "users.profile.get"
       );
-      return resp;
-    } catch (e) {
-      lastErr = e;
+      return response;
+    } catch (error) {
+      lastError = error;
       log("WARN", "Slack profile.get failed, retrying", {
-        attempt: i,
-        error: String(e),
+        attempt,
+        error: String(error),
       });
-      await new Promise((r) => setTimeout(r, 250 * i));
+      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 function normalizeEmoji(emoji: string | undefined) {
@@ -283,20 +307,27 @@ function normalizeText(text: string | undefined) {
   return (text ?? "").trim();
 }
 
-function isScriptOwnedStatus(text: string, emoji: string, cfg: RequiredPick) {
-  const e = normalizeEmoji(emoji);
-  if (e === cfg.statusEmoji || e === cfg.statusEmojiUnicode) {
+function isStatusOwnedByScript(
+  text: string,
+  emoji: string,
+  config: StatusEmojiConfig
+) {
+  const normalizedEmoji = normalizeEmoji(emoji);
+  if (
+    normalizedEmoji === config.statusEmoji ||
+    normalizedEmoji === config.statusEmojiUnicode
+  ) {
     if (text === "" || text.includes(" - ")) return true;
   }
   return false;
 }
 
-type RequiredPick = {
+type StatusEmojiConfig = {
   statusEmoji: string;
   statusEmojiUnicode: string;
 };
 
-type RuntimeCfg = RequiredPick & {
+type RuntimeConfig = StatusEmojiConfig & {
   statusTtlSeconds: number;
   alwaysOverride: boolean;
   logMaxLines: number;
@@ -308,102 +339,127 @@ type RuntimeCfg = RequiredPick & {
   emptyReadConfirmWindowSeconds: number;
 };
 
-function isEmptyStatus(text: string, emoji: string) {
+function isEmptySlackStatus(text: string, emoji: string) {
   return normalizeText(text) === "" && normalizeEmoji(emoji) === "";
 }
 
-function isSafeToOverrideWhenPlaying(statusText: string, statusEmoji: string) {
+function isSafeToOverrideWhenPlayingTrack(
+  statusText: string,
+  statusEmoji: string
+) {
   // User rule: If either the status text OR status emoji is empty, it is safe to update
   // and we should not skip.
   return statusText === "" || statusEmoji === "";
 }
 
 async function main() {
-  const repoDir = process.cwd();
-  const { config, path: configPath } = await loadConfig(repoDir);
+  const repositoryDirectory = process.cwd();
+  const { config, path: configPath } =
+    await loadConfiguration(repositoryDirectory);
 
-  const cfg: RuntimeCfg = {
-    statusEmoji: config.statusEmoji ?? ":headphones:",
-    statusEmojiUnicode: config.statusEmojiUnicode ?? "🎧",
-    statusTtlSeconds: config.statusTtlSeconds ?? 120,
-    alwaysOverride: config.alwaysOverride ?? false,
-    logMaxLines: config.logMaxLines ?? 5000,
-    logKeepLines: config.logKeepLines ?? 3000,
+  const runtimeConfig: RuntimeConfig = {
+    statusEmoji: config.statusEmoji ?? DEFAULT_CONFIG.statusEmoji,
+    statusEmojiUnicode:
+      config.statusEmojiUnicode ?? DEFAULT_CONFIG.statusEmojiUnicode,
+    statusTtlSeconds:
+      config.statusTtlSeconds ?? DEFAULT_CONFIG.statusTtlSeconds,
+    alwaysOverride: config.alwaysOverride ?? DEFAULT_CONFIG.alwaysOverride,
+    logMaxLines: config.logMaxLines ?? DEFAULT_CONFIG.logMaxLines,
+    logKeepLines: config.logKeepLines ?? DEFAULT_CONFIG.logKeepLines,
     stdoutLogPath:
-      config.stdoutLogPath ?? path.join(repoDir, "spotify-status.log"),
+      config.stdoutLogPath ??
+      path.join(repositoryDirectory, "spotify-status.log"),
     stderrLogPath:
-      config.stderrLogPath ?? path.join(repoDir, "spotify-status.error.log"),
-    cacheMaxAgeSeconds: config.cacheMaxAgeSeconds ?? 600,
+      config.stderrLogPath ??
+      path.join(repositoryDirectory, "spotify-status.error.log"),
+    cacheMaxAgeSeconds:
+      config.cacheMaxAgeSeconds ?? DEFAULT_CONFIG.cacheMaxAgeSeconds,
     requireTwoEmptyReadsBeforeOverride:
-      config.requireTwoEmptyReadsBeforeOverride ?? true,
-    emptyReadConfirmWindowSeconds: config.emptyReadConfirmWindowSeconds ?? 600,
+      config.requireTwoEmptyReadsBeforeOverride ??
+      DEFAULT_CONFIG.requireTwoEmptyReadsBeforeOverride,
+    emptyReadConfirmWindowSeconds:
+      config.emptyReadConfirmWindowSeconds ??
+      DEFAULT_CONFIG.emptyReadConfirmWindowSeconds,
   };
 
-  await trimLogFile(cfg.stdoutLogPath, cfg.logMaxLines, cfg.logKeepLines);
-  await trimLogFile(cfg.stderrLogPath, cfg.logMaxLines, cfg.logKeepLines);
+  await trimLogFile(
+    runtimeConfig.stdoutLogPath,
+    runtimeConfig.logMaxLines,
+    runtimeConfig.logKeepLines
+  );
+  await trimLogFile(
+    runtimeConfig.stderrLogPath,
+    runtimeConfig.logMaxLines,
+    runtimeConfig.logKeepLines
+  );
 
   log("INFO", chalk.bold("spotify-status-on-slack"), {
     version: SCRIPT_VERSION,
     pid: process.pid,
-    cwd: repoDir,
+    cwd: repositoryDirectory,
     configPath,
   });
 
-  const cache = await loadCache(repoDir);
+  const cache = await loadCache(repositoryDirectory);
 
-  const running = await isSpotifyRunning();
-  log("DEBUG", "Spotify running check", { running });
-  if (!running) {
+  const spotifyRunning = await isSpotifyRunning();
+  log("DEBUG", "Spotify running check", { running: spotifyRunning });
+  if (!spotifyRunning) {
     log("INFO", "Spotify is not running; exiting (no status change).");
     return;
   }
 
-  const state = await getSpotifyState();
-  log("INFO", "Spotify player state", { state });
+  const playerState = await getSpotifyState();
+  log("INFO", "Spotify player state", { state: playerState });
 
   // Always read Slack status first to decide if we can touch it.
-  const prof = await slackProfileGetWithRetry(config.slackToken);
-  if (!prof.ok) {
+  const profileResponse = await getSlackProfileWithRetry(config.slackToken);
+  if (!profileResponse.ok) {
     log(
       "WARN",
       "Slack users.profile.get returned ok=false; skipping to avoid overrides",
       {
-        error: prof.error,
+        error: profileResponse.error,
       }
     );
     return;
   }
 
-  const statusText = normalizeText(prof.profile?.status_text);
-  const statusEmoji = normalizeEmoji(prof.profile?.status_emoji);
-  const statusExp = prof.profile?.status_expiration ?? 0;
+  const statusText = normalizeText(profileResponse.profile?.status_text);
+  const statusEmoji = normalizeEmoji(profileResponse.profile?.status_emoji);
+  const statusExpiration = profileResponse.profile?.status_expiration ?? 0;
 
-  const owned = isScriptOwnedStatus(statusText, statusEmoji, cfg);
-  const empty = isEmptyStatus(statusText, statusEmoji);
-  const safeToOverride =
-    isSafeToOverrideWhenPlaying(statusText, statusEmoji) || owned;
+  const isOwnedByScript = isStatusOwnedByScript(
+    statusText,
+    statusEmoji,
+    runtimeConfig
+  );
+  const isStatusEmpty = isEmptySlackStatus(statusText, statusEmoji);
+  const isSafeToOverride =
+    isSafeToOverrideWhenPlayingTrack(statusText, statusEmoji) ||
+    isOwnedByScript;
 
   log("INFO", "Slack current status snapshot", {
     statusText,
     statusEmoji,
-    statusExpiration: statusExp,
-    ownedByScript: owned,
-    empty,
-    safeToOverrideWhenPlaying: safeToOverride,
+    statusExpiration,
+    ownedByScript: isOwnedByScript,
+    empty: isStatusEmpty,
+    safeToOverrideWhenPlaying: isSafeToOverride,
   });
 
   // Cache only "protected" statuses: those that are clearly not ours (not owned) and fully set (both text + emoji).
-  if (!owned && statusText !== "" && statusEmoji !== "") {
+  if (!isOwnedByScript && statusText !== "" && statusEmoji !== "") {
     cache.lastNonEmptyNonOwned = {
       text: statusText,
       emoji: statusEmoji,
-      expiration: statusExp,
-      observedAt: nowSec(),
+      expiration: statusExpiration,
+      observedAt: currentTimestampSeconds(),
     };
   }
-  await saveCache(repoDir, cache);
+  await saveCache(repositoryDirectory, cache);
 
-  if (state !== "playing") {
+  if (playerState !== "playing") {
     log(
       "INFO",
       "Spotify not playing; exiting (status will expire if previously set)."
@@ -413,7 +469,7 @@ async function main() {
 
   // Guard: only override when it is safe (either field empty) OR the status is owned by this script.
   // If BOTH fields are non-empty and it's not owned, do not override (unless alwaysOverride is enabled).
-  if (!safeToOverride && !cfg.alwaysOverride) {
+  if (!isSafeToOverride && !runtimeConfig.alwaysOverride) {
     log(
       "WARN",
       "Skipping update because Slack status appears set by another app/user (both text and emoji are non-empty)."
@@ -421,40 +477,43 @@ async function main() {
     return;
   }
 
-  const rawTrack = await getSpotifyTrack();
-  const track = censorText(rawTrack);
-  const exp = nowSec() + cfg.statusTtlSeconds;
+  const rawTrackName = await getSpotifyTrack();
+  const censoredTrackName = censorText(rawTrackName);
+  const expirationEpoch =
+    currentTimestampSeconds() + runtimeConfig.statusTtlSeconds;
   log("INFO", "Updating Slack status to current track", {
-    rawTrack,
-    track,
-    censored: rawTrack !== track,
-    expirationEpoch: exp,
+    rawTrack: rawTrackName,
+    track: censoredTrackName,
+    censored: rawTrackName !== censoredTrackName,
+    expirationEpoch,
   });
 
-  const setResp = await slackApi<{ ok: boolean; error?: string }>(
+  const setResponse = await callSlackApi<{ ok: boolean; error?: string }>(
     config.slackToken,
     "users.profile.set",
     {
       profile: {
-        status_text: track,
-        status_emoji: cfg.statusEmoji,
-        status_expiration: exp,
+        status_text: censoredTrackName,
+        status_emoji: runtimeConfig.statusEmoji,
+        status_expiration: expirationEpoch,
       },
     }
   );
 
-  if (!setResp.ok) {
-    log("ERROR", "Slack users.profile.set failed", { error: setResp.error });
+  if (!setResponse.ok) {
+    log("ERROR", "Slack users.profile.set failed", {
+      error: setResponse.error,
+    });
     return;
   }
 
   cache.lastSetByScript = {
-    text: track,
-    emoji: cfg.statusEmoji,
-    expiration: exp,
-    setAt: nowSec(),
+    text: censoredTrackName,
+    emoji: runtimeConfig.statusEmoji,
+    expiration: expirationEpoch,
+    setAt: currentTimestampSeconds(),
   };
-  await saveCache(repoDir, cache);
+  await saveCache(repositoryDirectory, cache);
   log("INFO", chalk.green("Done"));
 }
 

@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Spotify Status Config</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="app-header">
+        <h1>Spotify x Slack</h1>
+      </header>
+
+      <nav class="tabs" role="tablist" aria-label="Main sections">
+        <button
+          id="tab-config"
+          class="tab is-active"
+          type="button"
+          role="tab"
+          data-tab="config"
+          aria-controls="panel-config"
+          aria-selected="true"
+        >
+          Config
+        </button>
+        <button
+          id="tab-logs"
+          class="tab"
+          type="button"
+          role="tab"
+          data-tab="logs"
+          aria-controls="panel-logs"
+          aria-selected="false"
+        >
+          Logs
+        </button>
+      </nav>
+
+      <section
+        id="panel-config"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-config"
+      >
+        <div class="panel-header">
+          <h2>Runtime Behavior</h2>
+          <div class="panel-actions">
+            <button id="reload-btn" class="btn" type="button">Reload</button>
+            <button id="reset-btn" class="btn" type="button">Reset</button>
+            <button id="save-btn" class="btn primary" type="submit" form="config-form">
+              Save
+            </button>
+          </div>
+        </div>
+
+        <form id="config-form" class="form-grid">
+          <div class="field">
+            <div class="field-title">
+              <label for="statusTtlSeconds">Status TTL (seconds)</label>
+              <span class="tooltip-anchor">
+                <button
+                  type="button"
+                  class="info-trigger"
+                  aria-label="About status TTL"
+                  aria-describedby="tip-status-ttl"
+                >
+                  i
+                </button>
+                <span id="tip-status-ttl" class="tooltip" role="tooltip">
+                  How long your Spotify status stays on Slack before Slack
+                  clears it automatically. Example: 120 means it expires after
+                  2 minutes.
+                </span>
+              </span>
+            </div>
+            <input
+              id="statusTtlSeconds"
+              name="statusTtlSeconds"
+              type="number"
+              min="0"
+              step="1"
+              inputmode="numeric"
+            />
+          </div>
+
+          <div class="field">
+            <div class="field-title">
+              <label for="alwaysOverride">Override status</label>
+              <span class="tooltip-anchor">
+                <button
+                  type="button"
+                  class="info-trigger"
+                  aria-label="About override status"
+                  aria-describedby="tip-override-status"
+                >
+                  i
+                </button>
+                <span id="tip-override-status" class="tooltip" role="tooltip">
+                  Turn this on if you want this app to replace any status you
+                  already have in Slack, even if you set it yourself.
+                </span>
+              </span>
+            </div>
+            <label class="checkbox-row" for="alwaysOverride">
+              <input id="alwaysOverride" name="alwaysOverride" type="checkbox" />
+              <span>Always override any existing Slack status</span>
+            </label>
+          </div>
+
+          <div class="field">
+            <div class="field-title">
+              <label for="cacheMaxAgeSeconds">Cache max age (seconds)</label>
+              <span class="tooltip-anchor">
+                <button
+                  type="button"
+                  class="info-trigger"
+                  aria-label="About cache max age"
+                  aria-describedby="tip-cache-max-age"
+                >
+                  i
+                </button>
+                <span id="tip-cache-max-age" class="tooltip" role="tooltip">
+                  How long this app can reuse the last Slack status it read
+                  before checking Slack again.
+                </span>
+              </span>
+            </div>
+            <input
+              id="cacheMaxAgeSeconds"
+              name="cacheMaxAgeSeconds"
+              type="number"
+              min="0"
+              step="1"
+              inputmode="numeric"
+            />
+          </div>
+
+          <div class="field">
+            <div class="field-title">
+              <label for="emptyReadConfirmWindowSeconds">Empty read window (seconds)</label>
+              <span class="tooltip-anchor">
+                <button
+                  type="button"
+                  class="info-trigger"
+                  aria-label="About empty read window"
+                  aria-describedby="tip-empty-read-window"
+                >
+                  i
+                </button>
+                <span id="tip-empty-read-window" class="tooltip" role="tooltip">
+                  Sometimes Slack briefly returns an empty status by mistake.
+                  This sets how long to wait for a second empty result before
+                  assuming the status is truly empty.
+                </span>
+              </span>
+            </div>
+            <input
+              id="emptyReadConfirmWindowSeconds"
+              name="emptyReadConfirmWindowSeconds"
+              type="number"
+              min="0"
+              step="1"
+              inputmode="numeric"
+            />
+          </div>
+        </form>
+
+        <div id="status" class="status" role="status" aria-live="polite">
+          Ready.
+        </div>
+      </section>
+
+      <section
+        id="panel-logs"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-logs"
+        hidden
+      >
+        <div class="panel-header">
+          <h2>Logs</h2>
+          <div class="panel-actions">
+            <button id="logs-clear-btn" class="btn" type="button">Clear logs</button>
+            <button id="logs-reload-btn" class="btn" type="button">Reload logs</button>
+          </div>
+        </div>
+
+        <div class="logs-toolbar">
+          <div class="logs-toggle-groups">
+            <div class="stream-toggle" role="group" aria-label="Log stream">
+              <button
+                id="stream-stdout-btn"
+                class="stream-btn is-active"
+                type="button"
+                data-stream="stdout"
+              >
+                Stdout
+              </button>
+              <button
+                id="stream-stderr-btn"
+                class="stream-btn"
+                type="button"
+                data-stream="stderr"
+              >
+                Stderr
+              </button>
+            </div>
+            <div class="sort-toggle" role="group" aria-label="Log sort direction">
+              <button
+                id="sort-newest-btn"
+                class="sort-btn is-active"
+                type="button"
+                data-sort="newest-first"
+              >
+                Newest first
+              </button>
+              <button
+                id="sort-oldest-btn"
+                class="sort-btn"
+                type="button"
+                data-sort="oldest-first"
+              >
+                Oldest first
+              </button>
+            </div>
+          </div>
+          <input
+            id="logs-search"
+            class="logs-search"
+            type="search"
+            placeholder="Search logs..."
+            autocomplete="off"
+          />
+        </div>
+
+        <p id="logs-meta" class="logs-meta">Loading logs...</p>
+        <div id="log-output" class="log-output" role="log" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

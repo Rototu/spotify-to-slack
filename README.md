@@ -20,6 +20,47 @@ cp config.example.json config.local.json
 bun run start
 ```
 
+## Config UI
+
+A lightweight Bun server serves a static UI to edit your config. It uses Basic
+Auth with a single password stored in `CONFIG_UI_PASSWORD` when that value is
+non-empty. If `CONFIG_UI_PASSWORD` is explicitly set to an empty string, auth
+is disabled.
+
+### Build UI (static)
+
+```bash
+bun run ui:build
+```
+
+### Run UI server
+
+```bash
+CONFIG_UI_PASSWORD=your-password bun run ui:serve
+```
+
+By default it serves `./dist` on port `3999`. Optional environment variables:
+
+- `CONFIG_UI_PORT`: override port
+- `CONFIG_UI_PUBLIC_DIR`: override static directory (default `dist`)
+- `CONFIG_PATH`: override config file path
+- `CONFIG_UI_PASSWORD`: Basic Auth password (set to empty string to disable auth)
+
+### Dev mode
+
+```bash
+bun run ui:watch
+CONFIG_UI_PASSWORD=your-password bun run ui:serve
+```
+
+Run the watcher in one terminal to rebuild assets, and the server in another.
+
+## Local-only runtime
+
+This project is intentionally local-only. The updater script reads config from
+`config.local.json` (or the fallback path under `~/.config`) and runs on your
+machine where Spotify is available.
+
 For automatic execution, use the included `com.spotify-status-on-slack.plist` with launchd:
 
 ```bash
@@ -36,6 +77,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.spotify-status-on-sl
 | `statusEmoji` | `:headphones:` | Slack emoji code for status |
 | `statusEmojiUnicode` | `🎧` | Unicode version (for detection) |
 | `alwaysOverride` | `false` | Override existing status even if set by another app |
+| `requireTwoEmptyReadsBeforeOverride` | `true` | Require two empty reads before overriding |
+| `emptyReadConfirmWindowSeconds` | `600` | Time window for double empty checks |
+| `cacheMaxAgeSeconds` | `600` | Cache lifetime in seconds |
 | `logMaxLines` | `5000` | Trim log when it exceeds this |
 | `logKeepLines` | `3000` | Keep this many lines after trim |
 | `stdoutLogPath` | `./spotify-status.log` | Log file path |

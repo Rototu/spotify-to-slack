@@ -5,12 +5,21 @@
   "main": "spotify-status.ts",
   "type": "module",
   "scripts": {
-    "start": "bun run spotify-status.ts",
-    "run": "bun run spotify-status.ts"
+    "start": "bun run serve",
+    "dev": "bun run ui:watch & bun --watch ui-server.ts",
+    "run": "bun run spotify-status.ts",
+    "build": "bun run ui:build",
+    "serve": "bun run ui:build && bun run ui:serve",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --write .",
+    "ui:build": "bun run scripts/ui-build.ts",
+    "ui:watch": "bun run scripts/ui-build.ts --watch",
+    "ui:serve": "bun run ui-server.ts"
   },
   "dependencies": {
     "chalk": "^5.4.1",
-    "obscenity": "^0.4.5"
+    "obscenity": "^0.4.5",
+    "zod": "^3.24.1"
   },
   "keywords": [
     "Slack",
@@ -18,5 +27,10 @@
     "Status"
   ],
   "author": "Emanuel Farauanu <rototuro@gmail.com>",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "^1.3.8"
+  },
+  "packageManager": "pnpm@10.10.0+sha512.d615db246fe70f25dcfea6d8d73dee782ce23e2245e3c4f6f888249fb568149318637dca73c2c5c8ef2a4ca0d5657fb9567188bfab47f566d1ee6ce987815c39"
 }
