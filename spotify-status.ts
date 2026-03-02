@@ -94,6 +94,8 @@ const cacheSchema: z.ZodType<Cache> = z
   .passthrough();
 
 const SCRIPT_VERSION = "ts-bun-v1";
+const SLACK_STATUS_TEXT_MAX_LENGTH = 100;
+const STATUS_TRUNCATION_SUFFIX = "...";
 
 function currentTimestampSeconds() {
   return Math.floor(Date.now() / 1000);
@@ -307,6 +309,23 @@ function normalizeText(text: string | undefined) {
   return (text ?? "").trim();
 }
 
+function truncateForSlackStatusText(text: string) {
+  const normalizedText = normalizeText(text);
+  const characters = Array.from(normalizedText);
+
+  if (characters.length <= SLACK_STATUS_TEXT_MAX_LENGTH) {
+    return normalizedText;
+  }
+
+  const prefixLength = Math.max(
+    0,
+    SLACK_STATUS_TEXT_MAX_LENGTH - STATUS_TRUNCATION_SUFFIX.length
+  );
+  return (
+    characters.slice(0, prefixLength).join("") + STATUS_TRUNCATION_SUFFIX
+  );
+}
+
 function isStatusOwnedByScript(
   text: string,
   emoji: string,
@@ -479,12 +498,17 @@ async function main() {
 
   const rawTrackName = await getSpotifyTrack();
   const censoredTrackName = censorText(rawTrackName);
+  const truncatedTrackName = truncateForSlackStatusText(censoredTrackName);
+  const censoredTrackLength = Array.from(censoredTrackName).length;
+  const truncatedTrackLength = Array.from(truncatedTrackName).length;
   const expirationEpoch =
     currentTimestampSeconds() + runtimeConfig.statusTtlSeconds;
   log("INFO", "Updating Slack status to current track", {
     rawTrack: rawTrackName,
-    track: censoredTrackName,
+    track: truncatedTrackName,
     censored: rawTrackName !== censoredTrackName,
+    truncated: truncatedTrackLength < censoredTrackLength,
+    trackLength: truncatedTrackLength,
     expirationEpoch,
   });
 
@@ -493,7 +517,7 @@ async function main() {
     "users.profile.set",
     {
       profile: {
-        status_text: censoredTrackName,
+        status_text: truncatedTrackName,
         status_emoji: runtimeConfig.statusEmoji,
         status_expiration: expirationEpoch,
       },
@@ -508,7 +532,7 @@ async function main() {
   }
 
   cache.lastSetByScript = {
-    text: censoredTrackName,
+    text: truncatedTrackName,
     emoji: runtimeConfig.statusEmoji,
     expiration: expirationEpoch,
     setAt: currentTimestampSeconds(),
