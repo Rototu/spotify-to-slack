@@ -1,8 +1,10 @@
 import chalk from "chalk";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
+import { createConnection } from "node:net";
 import { promisify } from "node:util";
 import { z } from "zod";
 import {
@@ -10,6 +12,7 @@ import {
   TextCensor,
   englishDataset,
   englishRecommendedTransformers,
+  type MatchPayload,
 } from "obscenity";
 import { type Config, DEFAULT_CONFIG } from "./config-schema";
 import {
@@ -26,9 +29,35 @@ const profanityMatcher = new RegExpMatcher({
   ...englishRecommendedTransformers,
 });
 const textCensor = new TextCensor();
+const WHOLE_WORD_CHARACTER_PATTERN = /[\p{L}\p{N}\p{M}]/u;
+
+function getPreviousCodePoint(text: string, index: number) {
+  return Array.from(text.slice(0, index)).at(-1) ?? "";
+}
+
+function getNextCodePoint(text: string, index: number) {
+  return Array.from(text.slice(index)).at(0) ?? "";
+}
+
+function isWholeWordBoundary(character: string) {
+  return character === "" || !WHOLE_WORD_CHARACTER_PATTERN.test(character);
+}
+
+function isWholeWordMatch(text: string, match: MatchPayload) {
+  const characterBefore = getPreviousCodePoint(text, match.startIndex);
+  const characterAfter = getNextCodePoint(text, match.endIndex + 1);
+
+  return (
+    isWholeWordBoundary(characterBefore) &&
+    isWholeWordBoundary(characterAfter)
+  );
+}
 
 function censorText(text: string): string {
-  const matches = profanityMatcher.getAllMatches(text);
+  // Only censor standalone words so names like "Pinegrove" stay untouched.
+  const matches = profanityMatcher
+    .getAllMatches(text, true)
+    .filter((match) => isWholeWordMatch(text, match));
   if (matches.length === 0) return text;
   return textCensor.applyTo(text, matches);
 }
@@ -65,6 +94,16 @@ type Cache = {
   };
 };
 
+type PlayerName = "spotify" | "ncspot";
+type PlayerState = "playing" | "paused" | "stopped" | "unknown";
+type PlayerSnapshot = {
+  name: PlayerName;
+  running: boolean;
+  state: PlayerState;
+  track: string | null;
+  detectionError?: string;
+};
+
 const cacheSchema: z.ZodType<Cache> = z
   .object({
     updatedAt: z.number().finite().min(0),
@@ -93,9 +132,27 @@ const cacheSchema: z.ZodType<Cache> = z
   })
   .passthrough();
 
-const SCRIPT_VERSION = "ts-bun-v1";
+const ncspotPlaybackSchema = z
+  .object({
+    mode: z.union([z.record(z.unknown()), z.string()]).optional(),
+    playable: z
+      .object({
+        title: z.string().optional(),
+        artists: z.array(z.string()).optional(),
+      })
+      .optional(),
+  })
+  .passthrough();
+
+const SCRIPT_VERSION = "ts-bun-v2";
 const SLACK_STATUS_TEXT_MAX_LENGTH = 100;
 const STATUS_TRUNCATION_SUFFIX = "...";
+const PLAYER_PRIORITY: PlayerName[] = ["ncspot", "spotify"];
+const DEFAULT_NCSPOT_EXECUTABLE_PATHS = [
+  "/opt/homebrew/bin/ncspot",
+  "/usr/local/bin/ncspot",
+  "/opt/local/bin/ncspot",
+];
 
 function currentTimestampSeconds() {
   return Math.floor(Date.now() / 1000);
@@ -126,14 +183,16 @@ function log(
       : chalk.red(level);
 
   const line = `${chalk.gray(timestampIso())} ${prefix} ${message}`;
+  const writer =
+    level === "WARN" || level === "ERROR" ? console.error : console.log;
   if (metadata && Object.keys(metadata).length > 0) {
     // Avoid dumping secrets.
     const sanitized = JSON.stringify(metadata, (_key, value) =>
       typeof value === "string" ? redactSlackToken(value) : value
     );
-    console.log(`${line} ${chalk.gray(sanitized)}`);
+    writer(`${line} ${chalk.gray(sanitized)}`);
   } else {
-    console.log(line);
+    writer(line);
   }
 }
 
@@ -225,18 +284,24 @@ async function osascript(script: string): Promise<string> {
   return stdout.trim();
 }
 
-async function isSpotifyRunning(): Promise<boolean> {
+async function isProcessRunning(processName: string): Promise<boolean> {
   try {
-    await executeFileAsync("/usr/bin/pgrep", ["Spotify"], { timeout: 3_000 });
+    await executeFileAsync("/usr/bin/pgrep", [processName], { timeout: 3_000 });
     return true;
   } catch {
     return false;
   }
 }
 
-async function getSpotifyState(): Promise<
-  "playing" | "paused" | "stopped" | "unknown"
-> {
+async function isSpotifyRunning(): Promise<boolean> {
+  return isProcessRunning("Spotify");
+}
+
+async function isNcspotRunning(): Promise<boolean> {
+  return isProcessRunning("ncspot");
+}
+
+async function getSpotifyState(): Promise<PlayerState> {
   try {
     const state = await osascript('tell application "Spotify" to player state');
     if (state === "playing" || state === "paused" || state === "stopped")
@@ -252,6 +317,298 @@ async function getSpotifyTrack(): Promise<string> {
     'tell application "Spotify" to artist of current track & " - " & name of current track'
   );
   return song;
+}
+
+function parseNcspotInfo(output: string) {
+  const info: {
+    userCachePath?: string;
+    userRuntimePath?: string;
+  } = {};
+
+  for (const line of output.split("\n")) {
+    const trimmedLine = line.trim();
+    if (trimmedLine === "") continue;
+
+    const separatorIndex = trimmedLine.indexOf(" ");
+    if (separatorIndex < 0) continue;
+
+    const key = trimmedLine.slice(0, separatorIndex);
+    const value = trimmedLine.slice(separatorIndex + 1).trim();
+
+    if (key === "USER_CACHE_PATH" && value !== "") {
+      info.userCachePath = value;
+    }
+    if (key === "USER_RUNTIME_PATH" && value !== "") {
+      info.userRuntimePath = value;
+    }
+  }
+
+  return info;
+}
+
+function getDefaultNcspotSocketPaths() {
+  const userId =
+    typeof process.getuid === "function" ? String(process.getuid()) : undefined;
+  const candidates = [
+    userId ? path.join("/tmp", `ncspot-${userId}`, "ncspot.sock") : undefined,
+    path.join(os.homedir(), ".cache", "ncspot", "ncspot.sock"),
+  ];
+
+  return candidates.filter(
+    (candidate): candidate is string =>
+      typeof candidate === "string" && candidate !== ""
+  );
+}
+
+function resolveExecutablePath(
+  executableName: string,
+  configuredPath: string | undefined,
+  fallbackAbsolutePaths: string[]
+) {
+  const pathDirectories = (Bun.env.PATH ?? process.env.PATH ?? "")
+    .split(path.delimiter)
+    .map((directory) => directory.trim())
+    .filter((directory) => directory !== "");
+
+  const candidates = [
+    configuredPath,
+    ...pathDirectories.map((directory) => path.join(directory, executableName)),
+    ...fallbackAbsolutePaths,
+  ].filter(
+    (candidate): candidate is string =>
+      typeof candidate === "string" && candidate !== ""
+  );
+
+  return candidates.find((candidate) => existsSync(candidate)) ?? executableName;
+}
+
+async function getNcspotSocketPaths(): Promise<string[]> {
+  const defaultSocketPaths = getDefaultNcspotSocketPaths();
+  const ncspotExecutablePath = resolveExecutablePath(
+    "ncspot",
+    Bun.env.NCSPOT_PATH ?? process.env.NCSPOT_PATH,
+    DEFAULT_NCSPOT_EXECUTABLE_PATHS
+  );
+
+  try {
+    const { stdout } = await executeFileAsync(ncspotExecutablePath, ["info"], {
+      timeout: 3_000,
+    });
+    const info = parseNcspotInfo(stdout);
+    const directories = [info.userRuntimePath, info.userCachePath].filter(
+      (candidate): candidate is string =>
+        typeof candidate === "string" && candidate !== ""
+    );
+
+    return Array.from(
+      new Set([
+        ...defaultSocketPaths,
+        ...directories.map((directory) => path.join(directory, "ncspot.sock")),
+      ])
+    );
+  } catch {
+    return defaultSocketPaths;
+  }
+}
+
+async function readNcspotSocketPayload(socketPath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let buffer = "";
+    let isSettled = false;
+
+    const timeoutId = setTimeout(() => {
+      finishWithError(
+        new Error(`Timed out waiting for ncspot IPC response from ${socketPath}.`)
+      );
+    }, 2_000);
+
+    function cleanup() {
+      clearTimeout(timeoutId);
+      if (!socket.destroyed) {
+        socket.destroy();
+      }
+    }
+
+    function finishWithValue(payload: string) {
+      if (isSettled) return;
+      isSettled = true;
+      cleanup();
+      resolve(payload);
+    }
+
+    function finishWithError(error: Error) {
+      if (isSettled) return;
+      isSettled = true;
+      cleanup();
+      reject(error);
+    }
+
+    function tryResolveBuffer() {
+      const trimmedBuffer = buffer.trim();
+      if (trimmedBuffer === "") return false;
+
+      try {
+        JSON.parse(trimmedBuffer);
+        finishWithValue(trimmedBuffer);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      tryResolveBuffer();
+    });
+    socket.on("end", () => {
+      if (!tryResolveBuffer()) {
+        finishWithError(
+          new Error(
+            `ncspot IPC connection closed before a complete payload was received from ${socketPath}.`
+          )
+        );
+      }
+    });
+    socket.on("error", (error) => {
+      finishWithError(
+        error instanceof Error ? error : new Error(String(error))
+      );
+    });
+  });
+}
+
+function getNcspotState(
+  mode: Record<string, unknown> | string | undefined
+): PlayerState {
+  if (!mode) return "unknown";
+  if (typeof mode === "string") {
+    const normalizedMode = mode.toLowerCase();
+    if (normalizedMode === "playing") return "playing";
+    if (normalizedMode === "paused") return "paused";
+    if (normalizedMode === "stopped") return "stopped";
+    return "unknown";
+  }
+  if (Object.hasOwn(mode, "Playing")) return "playing";
+  if (Object.hasOwn(mode, "Paused")) return "paused";
+  if (Object.hasOwn(mode, "Stopped")) return "stopped";
+  return "unknown";
+}
+
+function formatTrackName(artists: string[] | undefined, title: string | undefined) {
+  const normalizedArtists =
+    artists
+      ?.map((artist) => artist.trim())
+      .filter((artist) => artist !== "") ?? [];
+  const normalizedTitle = title?.trim() ?? "";
+
+  if (normalizedArtists.length > 0 && normalizedTitle !== "") {
+    return `${normalizedArtists.join(", ")} - ${normalizedTitle}`;
+  }
+  if (normalizedTitle !== "") return normalizedTitle;
+  if (normalizedArtists.length > 0) return normalizedArtists.join(", ");
+  return "";
+}
+
+async function getSpotifySnapshot(): Promise<PlayerSnapshot> {
+  const running = await isSpotifyRunning();
+  if (!running) {
+    return {
+      name: "spotify",
+      running: false,
+      state: "unknown",
+      track: null,
+    };
+  }
+
+  const state = await getSpotifyState();
+  if (state !== "playing") {
+    return {
+      name: "spotify",
+      running: true,
+      state,
+      track: null,
+    };
+  }
+
+  try {
+    return {
+      name: "spotify",
+      running: true,
+      state,
+      track: await getSpotifyTrack(),
+    };
+  } catch (error) {
+    return {
+      name: "spotify",
+      running: true,
+      state,
+      track: null,
+      detectionError:
+        error instanceof Error ? error.message : `Failed to read track: ${String(error)}`,
+    };
+  }
+}
+
+async function getNcspotSnapshot(): Promise<PlayerSnapshot> {
+  const running = await isNcspotRunning();
+  if (!running) {
+    return {
+      name: "ncspot",
+      running: false,
+      state: "unknown",
+      track: null,
+    };
+  }
+
+  try {
+    const socketPaths = await getNcspotSocketPaths();
+    const socketPath = socketPaths.find((candidate) => existsSync(candidate));
+
+    if (!socketPath) {
+      return {
+        name: "ncspot",
+        running: true,
+        state: "unknown",
+        track: null,
+        detectionError: "ncspot is running but no IPC socket was found.",
+      };
+    }
+
+    const payload = await readNcspotSocketPayload(socketPath);
+    const parsedPayload = ncspotPlaybackSchema.safeParse(JSON.parse(payload));
+    if (!parsedPayload.success) {
+      return {
+        name: "ncspot",
+        running: true,
+        state: "unknown",
+        track: null,
+        detectionError: "ncspot IPC payload was invalid.",
+      };
+    }
+
+    return {
+      name: "ncspot",
+      running: true,
+      state: getNcspotState(parsedPayload.data.mode),
+      track: formatTrackName(
+        parsedPayload.data.playable?.artists,
+        parsedPayload.data.playable?.title
+      ),
+    };
+  } catch (error) {
+    return {
+      name: "ncspot",
+      running: true,
+      state: "unknown",
+      track: null,
+      detectionError:
+        error instanceof Error
+          ? error.message
+          : `Failed to query ncspot: ${String(error)}`,
+    };
+  }
 }
 
 async function callSlackApi<T>(
@@ -371,6 +728,26 @@ function isSafeToOverrideWhenPlayingTrack(
   return statusText === "" || statusEmoji === "";
 }
 
+function comparePlayerSnapshots(a: PlayerSnapshot, b: PlayerSnapshot) {
+  const runningDifference = Number(b.running) - Number(a.running);
+  if (runningDifference !== 0) return runningDifference;
+
+  const stateOrder: Record<PlayerState, number> = {
+    playing: 0,
+    paused: 1,
+    stopped: 2,
+    unknown: 3,
+  };
+  const stateDifference = stateOrder[a.state] - stateOrder[b.state];
+  if (stateDifference !== 0) return stateDifference;
+
+  return PLAYER_PRIORITY.indexOf(a.name) - PLAYER_PRIORITY.indexOf(b.name);
+}
+
+function getPlayerDisplayName(playerName: PlayerName) {
+  return playerName === "spotify" ? "Spotify" : "ncspot";
+}
+
 async function main() {
   const repositoryDirectory = process.cwd();
   const { config, path: configPath } =
@@ -421,15 +798,41 @@ async function main() {
 
   const cache = await loadCache(repositoryDirectory);
 
-  const spotifyRunning = await isSpotifyRunning();
-  log("DEBUG", "Spotify running check", { running: spotifyRunning });
-  if (!spotifyRunning) {
-    log("INFO", "Spotify is not running; exiting (no status change).");
+  const playerSnapshots = await Promise.all([
+    getSpotifySnapshot(),
+    getNcspotSnapshot(),
+  ]);
+  for (const snapshot of playerSnapshots) {
+    log("DEBUG", "Player detection snapshot", {
+      player: snapshot.name,
+      running: snapshot.running,
+      state: snapshot.state,
+      hasTrack: snapshot.track !== null && snapshot.track !== "",
+      error: snapshot.detectionError,
+    });
+  }
+
+  const selectedPlayer = [...playerSnapshots].sort(comparePlayerSnapshots)[0];
+  if (!selectedPlayer || !selectedPlayer.running) {
+    log("INFO", "No supported player is running; exiting (no status change).");
     return;
   }
 
-  const playerState = await getSpotifyState();
-  log("INFO", "Spotify player state", { state: playerState });
+  const activePlayers = playerSnapshots.filter(
+    (snapshot) => snapshot.running && snapshot.state === "playing"
+  );
+  if (activePlayers.length > 1) {
+    log("WARN", "Multiple supported players report active playback; using priority order.", {
+      players: activePlayers.map((snapshot) => snapshot.name),
+      selectedPlayer: selectedPlayer.name,
+    });
+  }
+
+  const selectedPlayerLabel = getPlayerDisplayName(selectedPlayer.name);
+  log("INFO", "Selected player", {
+    player: selectedPlayer.name,
+    state: selectedPlayer.state,
+  });
 
   // Always read Slack status first to decide if we can touch it.
   const profileResponse = await getSlackProfileWithRetry(config.slackToken);
@@ -478,10 +881,10 @@ async function main() {
   }
   await saveCache(repositoryDirectory, cache);
 
-  if (playerState !== "playing") {
+  if (selectedPlayer.state !== "playing") {
     log(
       "INFO",
-      "Spotify not playing; exiting (status will expire if previously set)."
+      `${selectedPlayerLabel} is not playing; exiting (status will expire if previously set).`
     );
     return;
   }
@@ -496,7 +899,15 @@ async function main() {
     return;
   }
 
-  const rawTrackName = await getSpotifyTrack();
+  const rawTrackName = selectedPlayer.track?.trim() ?? "";
+  if (rawTrackName === "") {
+    log(
+      "WARN",
+      `${selectedPlayerLabel} is playing but track metadata is unavailable; skipping update.`
+    );
+    return;
+  }
+
   const censoredTrackName = censorText(rawTrackName);
   const truncatedTrackName = truncateForSlackStatusText(censoredTrackName);
   const censoredTrackLength = Array.from(censoredTrackName).length;
@@ -504,6 +915,7 @@ async function main() {
   const expirationEpoch =
     currentTimestampSeconds() + runtimeConfig.statusTtlSeconds;
   log("INFO", "Updating Slack status to current track", {
+    player: selectedPlayer.name,
     rawTrack: rawTrackName,
     track: truncatedTrackName,
     censored: rawTrackName !== censoredTrackName,

@@ -1,10 +1,11 @@
 # spotify-to-slack
 
-Set your Slack status to the currently playing Spotify track. macOS only.
+Set your Slack status to the currently playing track from Spotify or `ncspot`.
+macOS only.
 
 ## Setup
 
-1. Create a Slack app at https://api.slack.com/apps
+1. Create a Slack app at [api.slack.com/apps](https://api.slack.com/apps)
 2. Add User Token Scopes: `users.profile:write` and `users.profile:read`
 3. Install to workspace and copy the User OAuth Token (`xoxp-...`)
 
@@ -56,7 +57,15 @@ See `package.json` for additional scripts (e.g. `ui:build`, `ui:watch`, `ui:serv
 
 This project is intentionally local-only. The updater script reads config from
 `config.local.json` (or the fallback path under `~/.config`) and runs on your
-machine where Spotify is available.
+machine where Spotify or `ncspot` is available.
+
+Player selection is automatic:
+
+- If one supported player is actively playing, that player is used.
+- If both are open, the updater prefers an actively playing player over one that
+  is merely paused or idle.
+- `ncspot` support uses its documented local IPC socket, so `ncspot` must be
+  installed and available on your `PATH`.
 
 For automatic execution, use the included `com.spotify-status-on-slack.plist` with launchd:
 
@@ -68,7 +77,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.spotify-status-on-sl
 ## Config
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+| --------- | ------- | ----------- |
 | `slackToken` | — | **Required.** Your Slack User OAuth Token (`xoxp-...`) |
 | `statusTtlSeconds` | `120` | Status auto-expires after this many seconds |
 | `statusEmoji` | `:headphones:` | Slack emoji code for status |
